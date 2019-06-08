@@ -16,6 +16,7 @@ import xerial.sbt.pack.PackPlugin
 import xerial.sbt.pack.PackPlugin.autoImport._
 
 import dotty.tools.sbtplugin.DottyPlugin.autoImport._
+import dotty.tools.sbtplugin.DottyPlugin.makeScalaInstance
 import dotty.tools.sbtplugin.DottyIDEPlugin.{ installCodeExtension, prepareCommand, runProcess }
 import dotty.tools.sbtplugin.DottyIDEPlugin.autoImport._
 
@@ -27,27 +28,48 @@ import sbtbuildinfo.BuildInfoPlugin.autoImport._
 
 import scala.util.Properties.isJavaAtLeast
 
-/* In sbt 0.13 the Build trait would expose all vals to the shell, where you
- * can use them in "set a := b" like expressions. This re-exposes them.
- */
-object ExposedValues extends AutoPlugin {
-  object autoImport {
-    val bootstrapFromPublishedJars = Build.bootstrapFromPublishedJars
-  }
+object MyScalaJSPlugin extends AutoPlugin {
+  import Build._
+
+  override def requires: Plugins = ScalaJSPlugin
+
+  override def projectSettings: Seq[Setting[_]] = Def.settings(
+    commonBootstrappedSettings,
+
+    /* Remove the Scala.js compiler plugin for scalac, and enable the
+     * Scala.js back-end of dotty instead.
+     */
+    libraryDependencies := {
+      val deps = libraryDependencies.value
+      deps.filterNot(_.name.startsWith("scalajs-compiler")).map(_.withDottyCompat(scalaVersion.value))
+    },
+    scalacOptions += "-scalajs",
+
+    // Replace the JVM JUnit dependency by the Scala.js one
+    libraryDependencies ~= {
+      _.filter(!_.name.startsWith("junit-interface"))
+    },
+    libraryDependencies +=
+      ("org.scala-js" %% "scalajs-junit-test-runtime" % scalaJSVersion  % "test").withDottyCompat(scalaVersion.value),
+
+    // Typecheck the Scala.js IR found on the classpath
+    scalaJSLinkerConfig ~= (_.withCheckIR(true)),
+  )
 }
 
 object Build {
   val scalacVersion = "2.12.8"
+  val referenceVersion = "0.15.0-RC1"
 
-  val baseVersion = "0.13.0"
-  val baseSbtDottyVersion = "0.2.7"
+  val baseVersion = "0.16.0"
+  val baseSbtDottyVersion = "0.3.4"
 
   // Versions used by the vscode extension to create a new project
   // This should be the latest published releases.
   // TODO: Have the vscode extension fetch these numbers from the Internet
   // instead of hardcoding them ?
-  val publishedDottyVersion = "0.11.0-RC1"
-  val publishedSbtDottyVersion = "0.2.6"
+  val publishedDottyVersion = referenceVersion
+  val publishedSbtDottyVersion = "0.3.3"
 
 
   val dottyOrganization = "ch.epfl.lamp"
@@ -85,9 +107,6 @@ object Build {
   // Run tests with filter through vulpix test suite
   val testCompilation = inputKey[Unit]("runs integration test with the supplied filter")
 
-  // Run TASTY tests with filter through vulpix test suite
-  val testFromTasty = inputKey[Unit]("runs tasty integration test with the supplied filter")
-
   // Spawns a repl with the correct classpath
   val repl = inputKey[Unit]("run the REPL with correct classpath")
 
@@ -103,8 +122,6 @@ object Build {
   // Shorthand for compiling a docs site
   val dottydoc = inputKey[Unit]("run dottydoc")
 
-  val bootstrapFromPublishedJars = settingKey[Boolean]("If true, bootstrap dotty from published non-bootstrapped dotty")
-
   // Only available in vscode-dotty
   val unpublish = taskKey[Unit]("Unpublish a package")
 
@@ -112,6 +129,8 @@ object Build {
   val ideTestsCompilerVersion = taskKey[String]("Compiler version to use in IDE tests")
   val ideTestsCompilerArguments = taskKey[Seq[String]]("Compiler arguments to use in IDE tests")
   val ideTestsDependencyClasspath = taskKey[Seq[File]]("Dependency classpath to use in IDE tests")
+
+  val fetchScalaJSSource = taskKey[File]("Fetch the sources of Scala.js")
 
   lazy val SourceDeps = config("sourcedeps")
 
@@ -131,9 +150,6 @@ object Build {
     ),
 
     javacOptions in (Compile, compile) ++= Seq("-Xlint:unchecked", "-Xlint:deprecation"),
-
-    // Change this to true if you want to bootstrap using a published non-bootstrapped compiler
-    bootstrapFromPublishedJars := false,
 
     // Override `runCode` from sbt-dotty to use the language-server and
     // vscode extension from the source repository of dotty instead of a
@@ -155,16 +171,6 @@ object Build {
           try fileStream.iterator().hasNext
           finally fileStream.close()
         }
-      }
-
-      // Make sure all submodules are properly cloned
-      val submodules = List("scala-backend", "scala2-library")
-      if (!submodules.forall(exists)) {
-        sLog.value.log(Level.Error,
-          s"""Missing some of the submodules
-             |You can initialize the modules with:
-             |  > git submodule update --init
-          """.stripMargin)
       }
 
       // Copy default configuration from .vscode-template/ unless configuration files already exist in .vscode/
@@ -208,21 +214,33 @@ object Build {
   // Settings used for projects compiled only with Java
   lazy val commonJavaSettings = commonSettings ++ Seq(
     version := dottyVersion,
-    scalaVersion := scalacVersion,
+    scalaVersion := referenceVersion,
+    // To be removed once we stop cross-compiling with Scala 2
+    crossScalaVersions := Seq(referenceVersion, scalacVersion),
     // Do not append Scala versions to the generated artifacts
     crossPaths := false,
     // Do not depend on the Scala library
+    autoScalaLibrary := false,
+    excludeFromIDE := true
+  )
+
+  // Settings used when compiling dotty (both non-boostrapped and bootstrapped)
+  lazy val commonDottySettings = commonSettings ++ Seq(
+    // Manually set the standard library to use
     autoScalaLibrary := false
   )
 
-  // Settings used when compiling dotty using Scala 2
-  lazy val commonNonBootstrappedSettings = commonSettings ++ Seq(
+  // Settings used when compiling dotty with the reference compiler
+  lazy val commonNonBootstrappedSettings = commonDottySettings ++ Seq(
     version := dottyNonBootstrappedVersion,
-    scalaVersion := scalacVersion
+    scalaVersion := referenceVersion,
+    // To be removed once we stop cross-compiling with Scala 2
+    crossScalaVersions := Seq(referenceVersion, scalacVersion),
+    excludeFromIDE := true
   )
 
   // Settings used when compiling dotty with a non-bootstrapped dotty
-  lazy val commonBootstrappedSettings = commonSettings ++ Seq(
+  lazy val commonBootstrappedSettings = commonDottySettings ++ Seq(
     version := dottyVersion,
     scalaVersion := dottyNonBootstrappedVersion,
 
@@ -232,20 +250,6 @@ object Build {
 
     // Use the same name as the non-bootstrapped projects for the artifacts
     moduleName ~= { _.stripSuffix("-bootstrapped") },
-
-    // Prevent sbt from setting the Scala bootclasspath, otherwise it will
-    // contain `scalaInstance.value.libraryJar` which in our case is the
-    // non-bootstrapped dotty-library that will then take priority over
-    // the bootstrapped dotty-library on the classpath or sourcepath.
-    classpathOptions ~= (_.withAutoBoot(false)),
-    // ... but when running under Java 8, we still need a Scala bootclasspath that contains the JVM bootclasspath,
-    // otherwise sbt incremental compilation breaks.
-    scalacOptions ++= {
-      if (isJavaAtLeast("9"))
-        Seq()
-      else
-        Seq("-bootclasspath", sys.props("sun.boot.class.path"))
-    },
 
     // Enforce that the only Scala 2 classfiles we unpickle come from scala-library
     /*
@@ -259,71 +263,40 @@ object Build {
     // sbt gets very unhappy if two projects use the same target
     target := baseDirectory.value / ".." / "out" / "bootstrap" / name.value,
 
-    // The non-bootstrapped dotty-library is not necessary when bootstrapping dotty
-    autoScalaLibrary := false,
-    // ...but scala-library is
-    libraryDependencies += "org.scala-lang" % "scala-library" % scalacVersion,
-
-    ivyConfigurations ++= {
-      if (bootstrapFromPublishedJars.value)
-        Seq(Configurations.ScalaTool)
-      else
-        Seq()
-    },
-    libraryDependencies ++= {
-      if (bootstrapFromPublishedJars.value)
-        Seq(
-          dottyOrganization %% "dotty-library" % dottyNonBootstrappedVersion % Configurations.ScalaTool.name,
-          dottyOrganization %% "dotty-compiler" % dottyNonBootstrappedVersion % Configurations.ScalaTool.name
-        ).map(_.withDottyCompat(scalaVersion.value))
-      else
-        Seq()
-    },
-
     // Compile using the non-bootstrapped and non-published dotty
     managedScalaInstance := false,
     scalaInstance := {
-      import sbt.internal.inc.ScalaInstance
-      import sbt.internal.inc.classpath.ClasspathUtilities
+      val externalDeps = externalDependencyClasspath.in(`dotty-doc`, Compile).value
+      def getExternalDep(name: String): File =
+        externalDeps.find(_.get(artifact.key).exists(_.name == name))
+          .getOrElse(throw new MessageOnlyException(s"Artifact for $name not found in $externalDeps"))
+          .data
 
-      val updateReport = update.value
-      var libraryJar = packageBin.in(`dotty-library`, Compile).value
-      var compilerJar = packageBin.in(`dotty-compiler`, Compile).value
+      val scalaLibrary = getExternalDep("scala-library")
 
-      if (bootstrapFromPublishedJars.value) {
-        val jars = updateReport.select(
-            configuration = configurationFilter(Configurations.ScalaTool.name),
-            module = moduleFilter(),
-            artifact = artifactFilter(extension = "jar")
-          )
-        libraryJar = jars.find(_.getName.startsWith("dotty-library_2.12")).get
-        compilerJar = jars.find(_.getName.startsWith("dotty-compiler_2.12")).get
-      }
+      // IMPORTANT: We need to use actual jars to form the ScalaInstance and not
+      // just directories containing classfiles because sbt maintains a cache of
+      // compiler instances. This cache is invalidated based on timestamps
+      // however this is only implemented on jars, directories are never
+      // invalidated.
+      val dottyLibrary = packageBin.in(`dotty-library`, Compile).value
+      val dottyInterfaces = packageBin.in(`dotty-interfaces`, Compile).value
+      val dottyCompiler = packageBin.in(`dotty-compiler`, Compile).value
+      val dottyDoc = packageBin.in(`dotty-doc`, Compile).value
 
-      // All dotty-doc's and compiler's dependencies except the library.
-      // (we get the compiler's dependencies because dottydoc depends on the compiler)
-      val otherDependencies = {
-        val excluded = Set("dotty-library", "dotty-compiler")
-        fullClasspath.in(`dotty-doc`, Compile).value
-          .filterNot(_.get(artifact.key).exists(a => excluded.contains(a.name)))
-          .map(_.data)
-      }
+      val allJars = Seq(dottyLibrary, dottyInterfaces, dottyCompiler, dottyDoc) ++ externalDeps.map(_.data)
 
-      val allJars = libraryJar :: compilerJar :: otherDependencies.toList
-      val classLoader = state.value.classLoaderCache(allJars)
-      new ScalaInstance(
+      makeScalaInstance(
+        state.value,
         scalaVersion.value,
-        classLoader,
-        ClasspathUtilities.rootLoader, // FIXME: Should be a class loader which only includes the dotty-lib
-                                       // See: https://github.com/sbt/zinc/commit/9397b6aaf94ac3cfab386e3abd11c0ef9c2ceaff#diff-ea135f2f26f43e40ff045089da221e1e
-                                       // Should not matter, as it addresses an issue with `sbt run` that
-                                       // only occur when `(fork in run) := false`
-        libraryJar,
-        compilerJar,
-        allJars.toArray,
-        None
+        scalaLibrary,
+        dottyLibrary,
+        dottyCompiler,
+        allJars
       )
-    }
+    },
+    // sbt-dotty defines `scalaInstance in doc` so we need to override it manually
+    scalaInstance in doc := scalaInstance.value,
   )
 
   lazy val commonBenchmarkSettings = Seq(
@@ -347,11 +320,6 @@ object Build {
 
   /** Projects -------------------------------------------------------------- */
 
-  // Needed because the dotty project aggregates dotty-sbt-bridge but dotty-sbt-bridge
-  // currently refers to dotty in its scripted task and "aggregate" does not take by-name
-  // parameters: https://github.com/sbt/sbt/issues/2200
-  lazy val dottySbtBridgeRef = LocalProject("dotty-sbt-bridge")
-
   // The root project:
   // - aggregates other projects so that "compile", "test", etc are run on all projects at once.
   // - publishes its own empty artifact "dotty" that depends on "dotty-library" and "dotty-compiler",
@@ -367,7 +335,8 @@ object Build {
     val dottyLib = jars("dotty-library")
     val dottyInterfaces = jars("dotty-interfaces")
     val otherDeps = (dependencyClasspath in Compile).value.map(_.data).mkString(File.pathSeparator)
-    dottyLib + File.pathSeparator + dottyInterfaces + File.pathSeparator + otherDeps
+    val attList = (dependencyClasspath in Runtime).value
+    dottyLib + File.pathSeparator + findLib(attList, "scala-library-")
   }
 
   lazy val semanticdbSettings = Seq(
@@ -382,8 +351,7 @@ object Build {
     )
   )
 
-  // Settings shared between dotty-doc and dotty-doc-bootstrapped
-  lazy val dottyDocSettings = Seq(
+  def dottyDocSettings(implicit mode: Mode) = Seq(
     baseDirectory in (Compile, run) := baseDirectory.value / "..",
     baseDirectory in Test := baseDirectory.value / "..",
 
@@ -401,9 +369,10 @@ object Build {
       val majorVersion = baseVersion.take(baseVersion.lastIndexOf('.'))
       IO.write(file("./docs/_site/versions/latest-nightly-base"), majorVersion)
 
-      val sources =
-        unmanagedSources.in(Compile, compile).value ++
-        unmanagedSources.in(`dotty-compiler`, Compile).value
+      val sources = unmanagedSources.in(mode match {
+        case NonBootstrapped => `dotty-library`
+        case Bootstrapped => `dotty-library-bootstrapped`
+      }, Compile).value
       val args = Seq(
         "-siteroot", "docs",
         "-project", "Dotty",
@@ -448,15 +417,6 @@ object Build {
     case Bootstrapped => `dotty-doc-bootstrapped`
   }
 
-  def testOnlyFiltered(test: String, options: String) = Def.inputTaskDyn {
-    val args = spaceDelimited("<arg>").parsed
-    val cmd = s" $test -- $options" + {
-      if (args.nonEmpty) " -Ddotty.tests.filter=" + args.mkString(" ")
-      else ""
-    }
-    (testOnly in Test).toTask(cmd)
-  }
-
   def findLib(attList: Seq[Attributed[File]], name: String) = attList
     .map(_.data.getAbsolutePath)
     .find(_.contains(name))
@@ -464,48 +424,6 @@ object Build {
 
   // Settings shared between dotty-compiler and dotty-compiler-bootstrapped
   lazy val commonDottyCompilerSettings = Seq(
-
-      // The scala-backend folder is a git submodule that contains a fork of the Scala 2.11
-      // compiler developed at https://github.com/lampepfl/scala/tree/sharing-backend.
-      // We do not compile the whole submodule, only the part of the Scala 2.11 GenBCode backend
-      // that we reuse for dotty.
-      // See http://dotty.epfl.ch/docs/contributing/backend.html for more information.
-      //
-      // NOTE: We link (or copy if symbolic links are not supported) these sources in
-      // the current project using `sourceGenerators` instead of simply
-      // referencing them using `unmanagedSourceDirectories` because the latter
-      // breaks some IDEs.
-      sourceGenerators in Compile += Def.task {
-        val outputDir = (sourceManaged in Compile).value
-
-        val submoduleCompilerDir = baseDirectory.value / ".." / "scala-backend" / "src" / "compiler"
-        val backendDir = submoduleCompilerDir / "scala" / "tools" / "nsc" / "backend"
-        val allScalaFiles = GlobFilter("*.scala")
-
-        // NOTE: Keep these exclusions synchronized with the ones in the tests (CompilationTests.scala)
-        val files = ((backendDir *
-          (allScalaFiles - "JavaPlatform.scala" - "Platform.scala" - "ScalaPrimitives.scala")) +++
-         (backendDir / "jvm") *
-          (allScalaFiles - "BCodeICodeCommon.scala" - "GenASM.scala" - "GenBCode.scala" - "ScalacBackendInterface.scala" - "BackendStats.scala")
-        ).get
-
-        val pairs = files.pair(sbt.Path.rebase(submoduleCompilerDir, outputDir))
-
-        try {
-          pairs.foreach { case (src, dst) =>
-            sbt.IO.createDirectory(dst.getParentFile)
-            if (!dst.exists)
-              Files.createSymbolicLink(/*link = */ dst.toPath, /*existing = */src.toPath)
-          }
-        } catch {
-          case _: UnsupportedOperationException | _: FileSystemException =>
-            // If the OS doesn't support symbolic links, copy the directory instead.
-            sbt.IO.copy(pairs, CopyOptions(overwrite = true, preserveLastModified = true, preserveExecutable = true))
-        }
-
-        pairs.map(_._2)
-      }.taskValue,
-
       // set system in/out for repl
       connectInput in run := true,
       outputStrategy := Some(StdoutOutput),
@@ -534,8 +452,6 @@ object Build {
       // get libraries onboard
       libraryDependencies ++= Seq(
         "org.scala-lang.modules" % "scala-asm" % "6.0.0-scala-1", // used by the backend
-        // FIXME: Not needed, but should be on the compiler CP
-        ("org.scala-lang.modules" %% "scala-xml" % "1.1.0").withDottyCompat(scalaVersion.value),
         "org.scala-lang" % "scala-library" % scalacVersion % "test",
         Dependencies.`compiler-interface`,
         "org.jline" % "jline-reader" % "3.9.0",   // used by the REPL
@@ -584,14 +500,21 @@ object Build {
             List("-XX:+TieredCompilation", "-XX:TieredStopAtLevel=1")
           else List()
 
+        val managedSrcDir = {
+          // Populate the directory
+          (managedSources in Compile).value
+
+          (sourceManaged in Compile).value
+        }
+
         val jarOpts = List(
+          "-Ddotty.tests.dottyCompilerManagedSources=" + managedSrcDir,
           "-Ddotty.tests.classes.dottyInterfaces=" + jars("dotty-interfaces"),
           "-Ddotty.tests.classes.dottyLibrary=" + jars("dotty-library"),
           "-Ddotty.tests.classes.dottyCompiler=" + jars("dotty-compiler"),
           "-Ddotty.tests.classes.compilerInterface=" + findLib(attList, "compiler-interface"),
-          "-Ddotty.tests.classes.scalaLibrary=" + findLib(attList, "scala-library"),
+          "-Ddotty.tests.classes.scalaLibrary=" + findLib(attList, "scala-library-"),
           "-Ddotty.tests.classes.scalaAsm=" + findLib(attList, "scala-asm"),
-          "-Ddotty.tests.classes.scalaXml=" + findLib(attList, "scala-xml"),
           "-Ddotty.tests.classes.jlineTerminal=" + findLib(attList, "jline-terminal"),
           "-Ddotty.tests.classes.jlineReader=" + findLib(attList, "jline-reader")
         )
@@ -599,8 +522,35 @@ object Build {
         jarOpts ::: tuning ::: agentOptions ::: ci_build
       },
 
-      testCompilation := testOnlyFiltered("dotty.tools.dotc.*CompilationTests", "--exclude-categories=dotty.SlowTests").evaluated,
-      testFromTasty := testOnlyFiltered("dotty.tools.dotc.FromTastyTests", "").evaluated,
+      testCompilation := Def.inputTaskDyn {
+        val args = spaceDelimited("<arg>").parsed
+        if (args.contains("--help")) {
+          println(
+            s"""
+               |usage: testCompilation [--help] [--from-tasty] [--update-checkfiles] [<filter>]
+               |
+               |By default runs tests in dotty.tools.dotc.*CompilationTests excluding tests tagged with dotty.SlowTests.
+               |
+               |  --help                show this message
+               |  --from-tasty          runs tests in dotty.tools.dotc.FromTastyTests
+               |  --update-checkfiles   override the checkfiles that did not match with the current output
+               |  <filter>              substring of the path of the tests file
+               |
+             """.stripMargin
+          )
+          (testOnly in Test).toTask(" not.a.test")
+        }
+        else {
+          val updateCheckfile = args.contains("--update-checkfiles")
+          val fromTasty = args.contains("--from-tasty")
+          val args1 = if (updateCheckfile | fromTasty) args.filter(x => x != "--update-checkfiles" && x != "--from-tasty") else args
+          val test = if (fromTasty) "dotty.tools.dotc.FromTastyTests" else "dotty.tools.dotc.*CompilationTests"
+          val cmd = s" $test -- --exclude-categories=dotty.SlowTests" +
+            (if (updateCheckfile) " -Ddotty.tests.updateCheckfiles=TRUE" else "") +
+            (if (args1.nonEmpty) " -Ddotty.tests.filter=" + args1.mkString(" ") else "")
+          (testOnly in Test).toTask(cmd)
+        }
+      }.evaluated,
 
       dotr := {
         val args: List[String] = spaceDelimited("<arg>").parsed.toList
@@ -620,9 +570,6 @@ object Build {
         } else if (scalaLib == "") {
           println("Couldn't find scala-library on classpath, please run using script in bin dir instead")
         } else if (args.contains("-with-compiler")) {
-          if (!isDotty.value) {
-            throw new MessageOnlyException("-with-compiler can only be used with a bootstrapped compiler")
-          }
           val args1 = args.filter(_ != "-with-compiler")
           val asm = findLib(attList, "scala-asm")
           val dottyCompiler = jars("dotty-compiler")
@@ -664,15 +611,17 @@ object Build {
             IO.delete(trgDir)
           IO.createDirectory(trgDir)
           IO.unzip(scalaJSIRSourcesJar, trgDir)
+
           (trgDir ** "*.scala").get.toSet
         } (Set(scalaJSIRSourcesJar)).toSeq
       }.taskValue,
   )
 
   def runCompilerMain(repl: Boolean = false) = Def.inputTaskDyn {
+    val log = streams.value.log
     val attList = (dependencyClasspath in Runtime).value
     val jars = packageAll.value
-    val scalaLib = findLib(attList, "scala-library")
+    val scalaLib = findLib(attList, "scala-library-")
     val dottyLib = jars("dotty-library")
     val dottyCompiler = jars("dotty-compiler")
     val args0: List[String] = spaceDelimited("<arg>").parsed.toList
@@ -691,8 +640,8 @@ object Build {
     var extraClasspath = s"$scalaLib${File.pathSeparator}$dottyLib"
     if ((decompile || printTasty) && !args.contains("-classpath")) extraClasspath += s"${File.pathSeparator}."
     if (args0.contains("-with-compiler")) {
-      if (!isDotty.value) {
-        throw new MessageOnlyException("-with-compiler can only be used with a bootstrapped compiler")
+      if (scalaVersion.value == referenceVersion) {
+        log.error("-with-compiler should only be used with a bootstrapped compiler")
       }
       extraClasspath += s"${File.pathSeparator}$dottyCompiler"
     }
@@ -756,15 +705,32 @@ object Build {
   // Settings shared between dotty-library and dotty-library-bootstrapped
   lazy val dottyLibrarySettings = Seq(
     libraryDependencies += "org.scala-lang" % "scala-library" % scalacVersion,
-    // Add version-specific source directories:
-    // - files in src-non-bootstrapped will only be compiled by the reference compiler (scalac)
-    // - files in src-bootstrapped will only be compiled by the current dotty compiler (non-bootstrapped and bootstrapped)
+
+    // Needed so that the library sources are visible when `dotty.tools.dotc.core.Definitions#init` is called
+    scalacOptions in Compile ++= Seq("-sourcepath", (scalaSource in Compile).value.getAbsolutePath),
+
+    // To be removed once we stop cross-compiling with Scala 2
     unmanagedSourceDirectories in Compile += {
       val baseDir = baseDirectory.value
-      if (isDotty.value)
-        baseDir / "src-bootstrapped"
+      if (!isDotty.value)
+        baseDir / "src-2.x"
       else
-        baseDir / "src-non-bootstrapped"
+        baseDir / "src-3.x"
+    },
+
+    // Add version-specific source directories:
+    // - files in src-non-bootstrapped will only be compiled by the reference compiler
+    // - files in src-bootstrapped will only be compiled by the current dotty compiler (non-bootstrapped and bootstrapped)
+    unmanagedSourceDirectories in Compile ++= {
+      val baseDir = baseDirectory.value
+      if (isDotty.value) {
+        if (scalaVersion.value == referenceVersion)
+          Seq(baseDir / "src-non-bootstrapped")
+        else
+          Seq(baseDir / "src-bootstrapped")
+      }
+      else
+        Seq()
     }
   )
 
@@ -776,19 +742,56 @@ object Build {
     case Bootstrapped => `dotty-library-bootstrapped`
   }
 
-  lazy val `dotty-sbt-bridge` = project.in(file("sbt-bridge")).
-    dependsOn(dottyCompiler(NonBootstrapped) % Provided).
+  /** The dotty standard library compiled with the Scala.js back-end, to produce
+   *  the corresponding .sjsir files.
+   *
+   *  This artifact must be on the classpath on every "Dotty.js" project.
+   *
+   *  Currently, only a very small fraction of the dotty library is actually
+   *  included in this project, and hence available to Dotty.js projects. More
+   *  will be added in the future as things are confirmed to be supported.
+   */
+  lazy val `dotty-library-bootstrappedJS`: Project = project.in(file("library-js")).
+    asDottyLibrary(Bootstrapped).
+    enablePlugins(MyScalaJSPlugin).
+    settings(
+      unmanagedSourceDirectories in Compile :=
+        (unmanagedSourceDirectories in (`dotty-library-bootstrapped`, Compile)).value,
+    )
+
+  lazy val `dotty-sbt-bridge` = project.in(file("sbt-bridge/src")).
+    // We cannot depend on any bootstrapped project to compile the bridge, since the
+    // bridge is needed to compile these projects.
     dependsOn(dottyDoc(NonBootstrapped) % Provided).
     settings(commonJavaSettings).
     settings(
       description := "sbt compiler bridge for Dotty",
-      libraryDependencies ++= Seq(
-        Dependencies.`compiler-interface` % Provided,
-        (Dependencies.`zinc-api-info` % Test).withDottyCompat(scalaVersion.value)
-      ),
+
+      sources in Test := Seq(),
+      scalaSource in Compile := baseDirectory.value,
+      javaSource  in Compile := baseDirectory.value,
+
+      // Referring to the other project using a string avoids an infinite loop
+      // when sbt reads the settings.
+      test in Test := (test in (LocalProject("dotty-sbt-bridge-tests"), Test)).value,
+
+      libraryDependencies += Dependencies.`compiler-interface` % Provided
+    )
+
+  // We use a separate project for the bridge tests since they can only be run
+  // with the bootstrapped library on the classpath.
+  lazy val `dotty-sbt-bridge-tests` = project.in(file("sbt-bridge/test")).
+    dependsOn(dottyCompiler(Bootstrapped) % Test).
+    settings(commonBootstrappedSettings).
+    settings(
+      sources in Compile := Seq(),
+      scalaSource in Test := baseDirectory.value,
+      javaSource  in Test := baseDirectory.value,
 
       fork in Test := true,
-      parallelExecution in Test := false
+      parallelExecution in Test := false,
+
+      libraryDependencies += (Dependencies.`zinc-api-info` % Test).withDottyCompat(scalaVersion.value)
     )
 
   lazy val `dotty-language-server` = project.in(file("language-server")).
@@ -804,9 +807,11 @@ object Build {
       fork in run := true,
       fork in Test := true,
       libraryDependencies ++= Seq(
-        "org.eclipse.lsp4j" % "org.eclipse.lsp4j" % "0.5.0",
+        "org.eclipse.lsp4j" % "org.eclipse.lsp4j" % "0.6.0",
         Dependencies.`jackson-databind`
       ),
+      // Work around https://github.com/eclipse/lsp4j/issues/295
+      dependencyOverrides += "org.eclipse.xtend" % "org.eclipse.xtend.lib" % "2.16.0",
       javaOptions := (javaOptions in `dotty-compiler-bootstrapped`).value,
 
       run := Def.inputTaskDyn {
@@ -859,31 +864,104 @@ object Build {
    *  useful, as that would not provide the linker and JS runners.
    */
   lazy val sjsSandbox = project.in(file("sandbox/scalajs")).
-    enablePlugins(ScalaJSPlugin).
-    settings(commonBootstrappedSettings).
+    enablePlugins(MyScalaJSPlugin).
+    dependsOn(`dotty-library-bootstrappedJS`).
     settings(
-      /* Remove the Scala.js compiler plugin for scalac, and enable the
-       * Scala.js back-end of dotty instead.
-       */
-      libraryDependencies := {
-        val deps = libraryDependencies.value
-        deps.filterNot(_.name.startsWith("scalajs-compiler")).map(_.withDottyCompat(scalaVersion.value))
-      },
-      scalacOptions += "-scalajs",
-
-      // The main class cannot be found automatically due to the empty inc.Analysis
-      mainClass in Compile := Some("hello.HelloWorld"),
-
       scalaJSUseMainModuleInitializer := true,
+    )
 
-      /* Debug-friendly Scala.js optimizer options.
-       * In particular, typecheck the Scala.js IR found on the classpath.
-       */
-      scalaJSLinkerConfig ~= {
-        _.withCheckIR(true).withParallel(false)
+  /** Scala.js test suite.
+   *
+   *  This project downloads the sources of the upstream Scala.js test suite,
+   *  and tests them with the dotty Scala.js back-end. Currently, only a very
+   *  small fraction of the upstream test suite is actually compiled and run.
+   *  It will grow in the future, as more stuff is confirmed to be supported.
+   */
+  lazy val sjsJUnitTests = project.in(file("tests/sjs-junit")).
+    enablePlugins(MyScalaJSPlugin).
+    dependsOn(`dotty-library-bootstrappedJS`).
+    settings(
+      scalacOptions --= Seq("-Xfatal-warnings", "-deprecation"),
+
+      sourceDirectory in fetchScalaJSSource := target.value / s"scala-js-src-$scalaJSVersion",
+
+      fetchScalaJSSource := {
+        import org.eclipse.jgit.api._
+
+        val s = streams.value
+        val ver = scalaJSVersion
+        val trgDir = (sourceDirectory in fetchScalaJSSource).value
+
+        if (!trgDir.exists) {
+          s.log.info(s"Fetching Scala.js source version $ver")
+          IO.createDirectory(trgDir)
+          new CloneCommand()
+            .setDirectory(trgDir)
+            .setURI("https://github.com/scala-js/scala-js.git")
+            .call()
+        }
+
+        // Checkout proper ref. We do this anyway so we fail if something is wrong
+        val git = Git.open(trgDir)
+        s.log.info(s"Checking out Scala.js source version $ver")
+        git.checkout().setName(s"v$ver").call()
+
+        trgDir
+      },
+
+      // We need JUnit in the Compile configuration
+      libraryDependencies +=
+        ("org.scala-js" %% "scalajs-junit-test-runtime" % scalaJSVersion).withDottyCompat(scalaVersion.value),
+
+      sourceGenerators in Compile += Def.task {
+        import org.scalajs.linker.CheckedBehavior
+
+        val stage = scalaJSStage.value
+
+        val linkerConfig = stage match {
+          case FastOptStage => (scalaJSLinkerConfig in (Compile, fastOptJS)).value
+          case FullOptStage => (scalaJSLinkerConfig in (Compile, fullOptJS)).value
+        }
+
+        val moduleKind = linkerConfig.moduleKind
+        val sems = linkerConfig.semantics
+
+        ConstantHolderGenerator.generate(
+            (sourceManaged in Compile).value,
+            "org.scalajs.testsuite.utils.BuildInfo",
+            "scalaVersion" -> scalaVersion.value,
+            "hasSourceMaps" -> false, //MyScalaJSPlugin.wantSourceMaps.value,
+            "isNoModule" -> (moduleKind == ModuleKind.NoModule),
+            "isESModule" -> (moduleKind == ModuleKind.ESModule),
+            "isCommonJSModule" -> (moduleKind == ModuleKind.CommonJSModule),
+            "isFullOpt" -> (stage == FullOptStage),
+            "compliantAsInstanceOfs" -> (sems.asInstanceOfs == CheckedBehavior.Compliant),
+            "compliantArrayIndexOutOfBounds" -> (sems.arrayIndexOutOfBounds == CheckedBehavior.Compliant),
+            "compliantModuleInit" -> (sems.moduleInit == CheckedBehavior.Compliant),
+            "strictFloats" -> sems.strictFloats,
+            "productionMode" -> sems.productionMode,
+            "es2015" -> linkerConfig.esFeatures.useECMAScript2015,
+        )
+      }.taskValue,
+
+      managedSources in Compile ++= {
+        val dir = fetchScalaJSSource.value / "test-suite/js/src/main/scala"
+        val filter = (
+          ("*.scala": FileFilter)
+            -- "Typechecking*.scala"
+            -- "NonNativeTypeTestSeparateRun.scala"
+        )
+        (dir ** filter).get
+      },
+
+      managedSources in Test ++= {
+        val dir = fetchScalaJSSource.value / "test-suite"
+        (
+          (dir / "shared/src/test/scala/org/scalajs/testsuite/compiler" ** "IntTest.scala").get
+          ++ (dir / "shared/src/test/scala/org/scalajs/testsuite/utils" ** "*.scala").get
+        )
       }
-    ).
-    settings(compileWithDottySettings)
+    )
 
   lazy val `dotty-bench` = project.in(file("bench")).asDottyBench(NonBootstrapped)
   lazy val `dotty-bench-bootstrapped` = project.in(file("bench")).asDottyBench(Bootstrapped)
@@ -962,7 +1040,7 @@ object Build {
     settings(commonSettings).
     settings(
       EclipseKeys.skipProject := true,
-      version := "0.1.13-snapshot", // Keep in sync with package.json
+      version := "0.1.15-snapshot", // Keep in sync with package.json
       autoScalaLibrary := false,
       publishArtifact := false,
       includeFilter in unmanagedSources := NothingFilter | "*.ts" | "**.json",
@@ -1014,10 +1092,13 @@ object Build {
       }.dependsOn(compile in Compile).evaluated
     )
 
-  val prepareCommunityBuild = taskKey[Unit]("Publish local the compiler and the sbt plugin. Also store the versions of the published local artefacts in two files, community-build/{dotty-bootstrapped.version,sbt-dotty.sbt}.")
+  val prepareCommunityBuild = taskKey[Unit]("Publish local the compiler and the sbt plugin. Also store the versions of the published local artefacts in two files, community-build/{dotty-bootstrapped.version,sbt-dotty-sbt}.")
+
+  val updateCommunityBuild = taskKey[Unit]("Updates the community build.")
 
   lazy val `community-build` = project.in(file("community-build")).
-    settings(commonNonBootstrappedSettings).
+    dependsOn(dottyLibrary(Bootstrapped)).
+    settings(commonBootstrappedSettings).
     settings(
       prepareCommunityBuild := {
         (publishLocal in `dotty-sbt-bridge`).value
@@ -1029,10 +1110,18 @@ object Build {
         (publishLocal in `dotty-compiler-bootstrapped`).value
         (publishLocal in `sbt-dotty`).value
         (publishLocal in `dotty-bootstrapped`).value
-        val pluginText = s"""addSbtPlugin("ch.epfl.lamp" % "sbt-dotty" % "$sbtDottyVersion")"""
-        IO.write(baseDirectory.value / "sbt-dotty.sbt", pluginText)
+        val pluginText =
+          s"""updateOptions in Global ~= (_.withLatestSnapshots(false))
+             |addSbtPlugin("ch.epfl.lamp" % "sbt-dotty" % "$sbtDottyVersion")""".stripMargin
+        IO.write(baseDirectory.value / "sbt-dotty-sbt", pluginText)
         IO.write(baseDirectory.value / "dotty-bootstrapped.version", dottyVersion)
       },
+      updateCommunityBuild := testOnly.in(Test).toTask(
+        " dotty.communitybuild.CommunityBuildUpdate -- --include-categories=dotty.communitybuild.UpdateCategory").value,
+      testOptions in Test += Tests.Argument(
+        TestFrameworks.JUnit,
+        "--include-categories=dotty.communitybuild.TestCategory",
+      ),
       (Test / testOnly) := ((Test / testOnly) dependsOn prepareCommunityBuild).evaluated,
       (Test / test    ) := ((Test / test    ) dependsOn prepareCommunityBuild).value
     )
@@ -1120,102 +1209,6 @@ object Build {
     )
   )
 
-  // Compile with dotty
-  lazy val compileWithDottySettings = {
-    inConfig(Compile)(inTask(compile)(Defaults.runnerTask) ++ Seq(
-      // Compile with dotty
-      fork in compile := true,
-
-      compile := {
-        val inputs = (compileInputs in compile).value
-        val inputOptions = inputs.options()
-        import inputOptions._
-
-        val s = streams.value
-        val logger = s.log
-        val cacheDir = s.cacheDirectory
-
-        // Discover classpaths
-
-        def cpToString(cp: Seq[File]) =
-          cp.map(_.getAbsolutePath).mkString(File.pathSeparator)
-
-        val compilerCp = Attributed.data((fullClasspath in (`dotty-compiler`, Compile)).value)
-        val cpStr = cpToString(classpath ++ compilerCp)
-
-        // List all my dependencies (recompile if any of these changes)
-
-        val allMyDependencies = classpath filterNot (_ == classesDirectory) flatMap { cpFile =>
-          if (cpFile.isDirectory) (cpFile ** "*.class").get
-          else Seq(cpFile)
-        }
-
-        // Compile
-
-        val run = (runner in compile).value
-        val cachedCompile = FileFunction.cached(cacheDir / "compile",
-            FilesInfo.lastModified, FilesInfo.exists) { dependencies =>
-
-          logger.info(
-              "Compiling %d Scala sources to %s..." format (
-              sources.size, classesDirectory))
-
-          if (classesDirectory.exists)
-            IO.delete(classesDirectory)
-          IO.createDirectory(classesDirectory)
-
-          val sourcesArgs = sources.map(_.getAbsolutePath()).toList
-
-          /* run.run() below in doCompile() will emit a call to its
-           * logger.info("Running dotty.tools.dotc.Main [...]")
-           * which we do not want to see. We use this patched logger to
-           * filter out that particular message.
-           */
-          val patchedLogger = new Logger {
-            def log(level: Level.Value, message: => String) = {
-              val msg = message
-              if (level != Level.Info ||
-                  !msg.startsWith("Running dotty.tools.dotc.Main"))
-                logger.log(level, msg)
-            }
-            def success(message: => String) = logger.success(message)
-            def trace(t: => Throwable) = logger.trace(t)
-          }
-
-          def doCompile(sourcesArgs: List[String]): Unit = {
-            run.run("dotty.tools.dotc.Main", compilerCp,
-                "-classpath" :: cpStr ::
-                "-d" :: classesDirectory.getAbsolutePath ::
-                scalacOptions ++:
-                sourcesArgs,
-                patchedLogger)
-          }
-
-          // Work around the Windows limitation on command line length.
-          val isWindows =
-            System.getProperty("os.name").toLowerCase().indexOf("win") >= 0
-          if ((fork in compile).value && isWindows &&
-              (sourcesArgs.map(_.length).sum > 1536)) {
-            IO.withTemporaryFile("sourcesargs", ".txt") { sourceListFile =>
-              IO.writeLines(sourceListFile, sourcesArgs)
-              doCompile(List("@"+sourceListFile.getAbsolutePath))
-            }
-          } else {
-            doCompile(sourcesArgs)
-          }
-
-          // Output is all files in classesDirectory
-          (classesDirectory ** AllPassFilter).get.toSet
-        }
-
-        cachedCompile((sources ++ allMyDependencies).toSet)
-
-        // We do not have dependency analysis when compiling externally
-        sbt.internal.inc.Analysis.Empty
-      }
-    ))
-  }
-
   lazy val commonDistSettings = Seq(
     packMain := Map(),
     publishArtifact := false,
@@ -1251,11 +1244,7 @@ object Build {
       settings(dottyCompilerSettings)
 
     def asDottyLibrary(implicit mode: Mode): Project = project.withCommonSettings.
-      settings(dottyLibrarySettings).
-      bootstrappedSettings(
-        // Needed so that the library sources are visible when `dotty.tools.dotc.core.Definitions#init` is called.
-        scalacOptions in Compile ++= Seq("-sourcepath", (scalaSource in Compile).value.getAbsolutePath)
-      )
+      settings(dottyLibrarySettings)
 
     def asDottyDoc(implicit mode: Mode): Project = project.withCommonSettings.
       dependsOn(dottyCompiler, dottyCompiler % "test->test").

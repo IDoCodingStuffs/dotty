@@ -37,7 +37,7 @@ object Instances extends Common {
       if (x < y) -1 else if (x > y) +1 else 0
   }
 
-  implied ListOrd[T] given Ord[T] for Ord[List[T]] {
+  implied ListOrd[T] for Ord[List[T]] given Ord[T] {
     def (xs: List[T]) compareTo (ys: List[T]): Int = (xs, ys) match {
       case (Nil, Nil) => 0
       case (Nil, _) => -1
@@ -66,7 +66,7 @@ object Instances extends Common {
       List(x)
   }
 
-  implied ReaderMonad[Ctx] for Monad[[X] => Ctx => X] {
+  implied ReaderMonad[Ctx] for Monad[[X] =>> Ctx => X] {
     def (r: Ctx => A) flatMap[A, B] (f: A => Ctx => B): Ctx => B =
       ctx => f(r(ctx))(ctx)
     def pure[A](x: A): Ctx => A =
@@ -120,28 +120,30 @@ object Instances extends Common {
     def f() = {
       locally {
         implied for Context = this.ctx
-        println(infer[Context].value)
+        println(the[Context].value)
       }
       locally {
         lazy val ctx1 = this.ctx
         implied for Context = ctx1
-        println(infer[Context].value)
+        println(the[Context].value)
       }
       locally {
         implied d[T] for D[T]
-        println(infer[D[Int]])
+        println(the[D[Int]])
       }
       locally {
-        implied given Context for D[Int]
-        println(infer[D[Int]])
+        implied for D[Int] given Context
+        println(the[D[Int]])
       }
     }
   }
 
   class Token(str: String)
 
-  implied StringToToken for Conversion[String, Token] {
-    def apply(str: String): Token = new Token(str)
+  object Token {
+    implied StringToToken for Conversion[String, Token] {
+      def apply(str: String): Token = new Token(str)
+    }
   }
 
   val x: Token = "if"
@@ -193,7 +195,7 @@ object AnonymousInstances extends Common {
     def (xs: List[T]) second[T] = xs.tail.head
   }
 
-  implied [From, To] given (c: Convertible[From, To]) for Convertible[List[From], List[To]] {
+  implied [From, To] for Convertible[List[From], List[To]] given (c: Convertible[From, To]) {
     def (x: List[From]) convert: List[To] = x.map(c.convert)
   }
 
@@ -203,7 +205,7 @@ object AnonymousInstances extends Common {
   }
 
   def sum[T: Monoid](xs: List[T]): T =
-      xs.foldLeft(infer[Monoid[T]].unit)(_.combine(_))
+      xs.foldLeft(the[Monoid[T]].unit)(_.combine(_))
 }
 
 object Implicits extends Common {
@@ -246,7 +248,8 @@ object Implicits extends Common {
 
 object Test extends App {
   Instances.test()
-  import PostConditions._
+  import PostConditions.result
+  import implied PostConditions._
   val s = List(1, 2, 3).sum
   s.ensuring(result == 6)
 }
@@ -263,22 +266,23 @@ object Completions {
     case Response(f: Future[HttpResponse])
     case Status(code: Future[StatusCode])
   }
+  object CompletionArg {
+
+    // conversions defining the possible arguments to pass to `complete`
+    // these always come with CompletionArg
+    // They can be invoked explicitly, e.g.
+    //
+    //   CompletionArg.from(statusCode)
+
+    implied fromString for Conversion[String, CompletionArg] = Error(_)
+    implied fromFuture for Conversion[Future[HttpResponse], CompletionArg] = Response(_)
+    implied fromStatusCode for Conversion[Future[StatusCode], CompletionArg] = Status(_)
+  }
   import CompletionArg._
 
   def complete[T](arg: CompletionArg) = arg match {
     case Error(s) => ???
     case Response(f) => ???
     case Status(code) => ???
-  }
-
-  // conversions defining the possible arguments to pass to `complete`
-  implied stringArg for Conversion[String, CompletionArg] {
-    def apply(s: String) = CompletionArg.Error(s)
-  }
-  implied responseArg for Conversion[Future[HttpResponse], CompletionArg] {
-    def apply(f: Future[HttpResponse]) = CompletionArg.Response(f)
-  }
-  implied statusArg for Conversion[Future[StatusCode], CompletionArg] {
-    def apply(code: Future[StatusCode]) = CompletionArg.Status(code)
   }
 }

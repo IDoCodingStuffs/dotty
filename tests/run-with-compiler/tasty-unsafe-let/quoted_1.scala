@@ -5,7 +5,7 @@ import scala.tasty._
 object Macros {
 
   inline def let[T](rhs: T)(body: => T => Unit): Unit =
-    ~impl('(rhs), '(body))
+    ${ impl('rhs, 'body) }
 
   private def impl[T](rhs: Expr[T], body: Expr[T => Unit])(implicit reflect: Reflection): Expr[Unit] = {
     import reflect._
@@ -14,8 +14,8 @@ object Macros {
 
     import reflect.util.{let => letTerm}
     letTerm(rhsTerm) { rhsId =>
-      body(rhsId.seal[Any].asInstanceOf[Expr[T]]).unseal // Dangerous uncheked cast!
-    }.seal[Unit]
+      body(rhsId.seal.asInstanceOf[Expr[T]]).unseal // Dangerous uncheked cast!
+    }.seal.cast[Unit]
   }
 
 

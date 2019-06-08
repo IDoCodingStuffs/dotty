@@ -104,9 +104,6 @@ object JavaParsers {
     def arrayOf(tpt: Tree): AppliedTypeTree =
       AppliedTypeTree(Ident(nme.Array.toTypeName), List(tpt))
 
-    def unimplementedExpr(implicit ctx: Context): Select =
-      Select(Select(rootDot(nme.scala_), nme.Predef), nme.???)
-
     def makeTemplate(parents: List[Tree], stats: List[Tree], tparams: List[TypeDef], needsDummyConstr: Boolean): Template = {
       def pullOutFirstConstr(stats: List[Tree]): (Tree, List[Tree]) = stats match {
         case (meth: DefDef) :: rest if meth.name == nme.CONSTRUCTOR => (meth, rest)
@@ -428,7 +425,7 @@ object JavaParsers {
         }
         val ts = buf.toList
         if (ts.tail.isEmpty) ts.head
-        else ts.reduce(AndTypeTree(_,_))
+        else ts.reduce(makeAndType(_,_))
       }
 
     def formalParams(): List[ValDef] = {
@@ -603,7 +600,7 @@ object JavaParsers {
       }
 
     def importCompanionObject(cdef: TypeDef): Tree =
-      Import(Ident(cdef.name.toTermName).withSpan(NoSpan), Ident(nme.WILDCARD) :: Nil)
+      Import(importImplied = false, Ident(cdef.name.toTermName).withSpan(NoSpan), Ident(nme.WILDCARD) :: Nil)
 
     // Importing the companion object members cannot be done uncritically: see
     // ticket #2377 wherein a class contains two static inner classes, each of which
@@ -665,7 +662,7 @@ object JavaParsers {
 //          case nme.WILDCARD => Pair(ident, Ident(null) withPos Span(-1))
 //          case _            => Pair(ident, ident)
 //        }
-        val imp = atSpan(start) { Import(qual, List(ident)) }
+        val imp = atSpan(start) { Import(importImplied = false, qual, List(ident)) }
         imp :: Nil
       }
     }
@@ -835,8 +832,7 @@ object JavaParsers {
         AppliedTypeTree(javaLangDot(tpnme.Enum), List(enumType))
         */
       val superclazz = Apply(TypeApply(
-        Select(New(javaLangDot(tpnme.Enum)), nme.CONSTRUCTOR), List(enumType)),
-        List(Literal(Constant(null)),Literal(Constant(0))))
+        Select(New(javaLangDot(tpnme.Enum)), nme.CONSTRUCTOR), List(enumType)), Nil)
       val enumclazz = atSpan(start, nameOffset) {
         TypeDef(name,
           makeTemplate(superclazz :: interfaces, body, List(), true)).withMods(mods | Flags.JavaEnum)

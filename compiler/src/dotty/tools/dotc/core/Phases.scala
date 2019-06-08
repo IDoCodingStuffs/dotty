@@ -217,8 +217,10 @@ object Phases {
     }
 
     private[this] var myTyperPhase: Phase = _
+    private[this] var myPostTyperPhase: Phase = _
     private[this] var mySbtExtractDependenciesPhase: Phase = _
     private[this] var myPicklerPhase: Phase = _
+    private[this] var myReifyQuotesPhase: Phase = _
     private[this] var myCollectNullableFieldsPhase: Phase = _
     private[this] var myRefChecksPhase: Phase = _
     private[this] var myPatmatPhase: Phase = _
@@ -233,8 +235,10 @@ object Phases {
     private[this] var myGenBCodePhase: Phase = _
 
     final def typerPhase: Phase = myTyperPhase
+    final def postTyperPhase: Phase = myPostTyperPhase
     final def sbtExtractDependenciesPhase: Phase = mySbtExtractDependenciesPhase
     final def picklerPhase: Phase = myPicklerPhase
+    final def reifyQuotesPhase: Phase = myReifyQuotesPhase
     final def collectNullableFieldsPhase: Phase = myCollectNullableFieldsPhase
     final def refchecksPhase: Phase = myRefChecksPhase
     final def patmatPhase: Phase = myPatmatPhase
@@ -252,8 +256,10 @@ object Phases {
       def phaseOfClass(pclass: Class[_]) = phases.find(pclass.isInstance).getOrElse(NoPhase)
 
       myTyperPhase = phaseOfClass(classOf[FrontEnd])
+      myPostTyperPhase = phaseOfClass(classOf[PostTyper])
       mySbtExtractDependenciesPhase = phaseOfClass(classOf[sbt.ExtractDependencies])
       myPicklerPhase = phaseOfClass(classOf[Pickler])
+      myReifyQuotesPhase = phaseOfClass(classOf[ReifyQuotes])
       myCollectNullableFieldsPhase = phaseOfClass(classOf[CollectNullableFields])
       myRefChecksPhase = phaseOfClass(classOf[RefChecks])
       myElimRepeatedPhase = phaseOfClass(classOf[ElimRepeated])
@@ -284,6 +290,10 @@ object Phases {
 
     def isRunnable(implicit ctx: Context): Boolean =
       !ctx.reporter.hasErrors
+        // TODO: This might test an unintended condition.
+        // To find out whether any errors have been reported during this
+        // run one calls `errorsReported`, not `hasErrors`.
+        // But maybe changing this would prevent useful phases from running?
 
     /** If set, allow missing or superfluous arguments in applications
      *  and type applications.

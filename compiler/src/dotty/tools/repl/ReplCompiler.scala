@@ -12,7 +12,7 @@ import dotty.tools.dotc.core.Phases.Phase
 import dotty.tools.dotc.core.StdNames._
 import dotty.tools.dotc.core.Symbols._
 import dotty.tools.dotc.reporting.diagnostic.messages
-import dotty.tools.dotc.transform.PostTyper
+import dotty.tools.dotc.transform.{PostTyper, Staging}
 import dotty.tools.dotc.typer.ImportInfo
 import dotty.tools.dotc.util.Spans._
 import dotty.tools.dotc.util.{ParsedComment, SourceFile}
@@ -34,6 +34,7 @@ class ReplCompiler extends Compiler {
   override protected def frontendPhases: List[List[Phase]] = List(
     List(new REPLFrontEnd),
     List(new CollectTopLevelImports),
+    List(new Staging),
     List(new PostTyper)
   )
 
@@ -47,9 +48,12 @@ class ReplCompiler extends Compiler {
       def importPreviousRun(id: Int)(implicit ctx: Context) = {
         // we first import the wrapper object id
         val path = nme.EMPTY_PACKAGE ++ "." ++ objectNames(id)
-        val importInfo = ImportInfo.rootImport(() =>
-          ctx.requiredModuleRef(path))
-        val ctx0 = ctx.fresh.setNewScope.setImportInfo(importInfo)
+        def importWrapper(c: Context, importImplied: Boolean) = {
+          val importInfo = ImportInfo.rootImport(() =>
+            c.requiredModuleRef(path), importImplied)
+          c.fresh.setNewScope.setImportInfo(importInfo)
+        }
+        val ctx0 = importWrapper(importWrapper(ctx, false), true)
 
         // then its user defined imports
         val imports = state.imports.getOrElse(id, Nil)
@@ -103,7 +107,7 @@ class ReplCompiler extends Compiler {
     Definitions(
       defs.toList,
       state.copy(
-        objectIndex = state.objectIndex + (if (defs.isEmpty) 0 else 1),
+        objectIndex = state.objectIndex + 1,
         valIndex = valIdx
       )
     )
@@ -123,21 +127,19 @@ class ReplCompiler extends Compiler {
    *  }
    *  ```
    */
-  private def wrapped(defs: Definitions, objectTermName: TermName): untpd.PackageDef = {
+  private def wrapped(defs: Definitions, objectTermName: TermName, span: Span): untpd.PackageDef = {
     import untpd._
-
-    assert(defs.stats.nonEmpty)
 
     implicit val ctx: Context = defs.state.context
 
     val tmpl = Template(emptyConstructor, Nil, Nil, EmptyValDef, defs.stats)
     val module = ModuleDef(objectTermName, tmpl)
-      .withSpan(Span(0, defs.stats.last.span.end))
+      .withSpan(span)
 
     PackageDef(Ident(nme.EMPTY_PACKAGE), List(module))
   }
 
-  private def createUnit(defs: Definitions)(implicit ctx: Context): CompilationUnit = {
+  private def createUnit(defs: Definitions, span: Span)(implicit ctx: Context): CompilationUnit = {
     val objectName = ctx.source.file.toString
     assert(objectName.startsWith(str.REPL_SESSION_LINE))
     assert(objectName.endsWith(defs.state.objectIndex.toString))
@@ -145,7 +147,7 @@ class ReplCompiler extends Compiler {
     objectNames.update(defs.state.objectIndex, objectTermName)
 
     val unit = CompilationUnit(ctx.source)
-    unit.untpdTree = wrapped(defs, objectTermName)
+    unit.untpdTree = wrapped(defs, objectTermName, span)
     unit
   }
 
@@ -158,8 +160,9 @@ class ReplCompiler extends Compiler {
   }
 
   final def compile(parsed: Parsed)(implicit state: State): Result[(CompilationUnit, State)] = {
+    assert(!parsed.trees.isEmpty)
     val defs = definitions(parsed.trees, state)
-    val unit = createUnit(defs)(state.context)
+    val unit = createUnit(defs, Span(0, parsed.trees.last.span.end))(state.context)
     runCompilationUnit(unit, defs.state)
   }
 
@@ -238,7 +241,7 @@ class ReplCompiler extends Compiler {
         PackageDef(Ident(nme.EMPTY_PACKAGE), List(wrapper))
       }
 
-      ParseResult(expr)(state) match {
+      ParseResult(sourceFile)(state) match {
         case Parsed(_, trees) =>
           wrap(trees).result
         case SyntaxErrors(_, reported, trees) =>

@@ -233,8 +233,6 @@ class TreeChecker extends Phase with SymTransformer {
         elems.foreach(assertIdentNotJavaClass)
       // case tree: TypeTree =>
       // case tree: SingletonTypeTree =>
-      // case tree: AndTypeTree =>
-      // case tree: OrTypeTree =>
       // case tree: RefinedTypeTree =>
       // case tree: AppliedTypeTree =>
       // case tree: ByNameTypeTree =>
@@ -403,9 +401,9 @@ class TreeChecker extends Phase with SymTransformer {
         }
       }
 
-    override def typedCase(tree: untpd.CaseDef, selType: Type, pt: Type, gadtSyms: Set[Symbol])(implicit ctx: Context): CaseDef = {
+    override def typedCase(tree: untpd.CaseDef, selType: Type, pt: Type)(implicit ctx: Context): CaseDef = {
       withPatSyms(tpd.patVars(tree.pat.asInstanceOf[tpd.Tree])) {
-        super.typedCase(tree, selType, pt, gadtSyms)
+        super.typedCase(tree, selType, pt)
       }
     }
 
