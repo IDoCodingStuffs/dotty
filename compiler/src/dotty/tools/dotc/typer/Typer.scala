@@ -1029,7 +1029,7 @@ class Typer extends Namer
     tree.selector match {
       case EmptyTree =>
         if (tree.isInline) {
-          checkInInlineContext("implied match", tree.posd)
+          checkInInlineContext("delegate match", tree.posd)
           val cases1 = tree.cases.mapconserve {
             case cdef @ CaseDef(pat @ Typed(Ident(nme.WILDCARD), _), _, _) =>
               // case _ : T  -->  case evidence$n : T
@@ -3021,9 +3021,7 @@ class Typer extends Namer
           val app = tryExtension(nestedCtx)
           if (!app.isEmpty && !nestedCtx.reporter.hasErrors) {
             nestedCtx.typerState.commit()
-            return new ExtMethodApply(app).withType(WildcardType)
-              // Use wildcard type in order not to prompt any further adaptations such as eta expansion
-              // before the method is fully applied.
+            return ExtMethodApply(app)
           }
         case _ =>
       }

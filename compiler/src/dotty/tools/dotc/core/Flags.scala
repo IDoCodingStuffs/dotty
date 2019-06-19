@@ -108,11 +108,11 @@ object Flags {
 
     /** The list of non-empty names of flags that are set in this FlagSet */
     def flagStrings(privateWithin: String): Seq[String] = {
-      val rawStrings = (2 to MaxFlag).flatMap(flagString)
-      val scopeStr =
-        if (this is Local) "this"
-        else privateWithin
-      if (privateWithin != "")
+      var rawStrings = (2 to MaxFlag).flatMap(flagString)
+      if (!privateWithin.isEmpty && !this.is(Protected))
+      	rawStrings = rawStrings :+ "private"
+      val scopeStr = if (this.is(Local)) "this" else privateWithin
+      if (scopeStr != "")
         rawStrings.filter(_ != "<local>").map {
           case "private" => s"private[$scopeStr]"
           case "protected" => s"protected[$scopeStr]"
@@ -392,7 +392,7 @@ object Flags {
   /** Symbol is a Java default method */
   final val DefaultMethod: FlagSet = termFlag(38, "<defaultmethod>")
 
-  final val Implied: FlagSet = commonFlag(39, "implied")
+  final val Implied: FlagSet = commonFlag(39, "delegate")
 
   /** Symbol is an enum class or enum case (if used with case) */
   final val Enum: FlagSet = commonFlag(40, "<enum>")
@@ -692,6 +692,9 @@ object Flags {
 
   /** A Java enum value */
   final val JavaEnumValue: FlagConjunction = allOf(StableRealizable, JavaStatic, JavaDefined, Enum)
+
+  /** An enum value */
+  final val EnumValue: FlagConjunction = allOf(StableRealizable, JavaStatic, Enum)
 
   /** Labeled private[this] */
   final val PrivateLocal: FlagConjunction = allOf(Private, Local)
